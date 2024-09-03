@@ -20,6 +20,8 @@ contract TokenFactory is Ownable {
      * @param symbol The symbol of the new token
      * @param contractBytecode The bytecode of the new token
      */
+    // @written-audit-high this won't work in ZKSync! It has to know the contract bytecode beforehand in order to work
+    // Look at the docs of ZKSync Era EVM compatibility
     function deployToken(string memory symbol, bytes memory contractBytecode) public onlyOwner returns (address addr) {
         assembly {
             addr := create(0, add(contractBytecode, 0x20), mload(contractBytecode))

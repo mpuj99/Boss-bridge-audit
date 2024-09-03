@@ -67,6 +67,13 @@ contract L1BossBridge is Ownable, Pausable, ReentrancyGuard {
      * @param l2Recipient The address of the user who will receive the tokens on L2
      * @param amount The amount of tokens to deposit
      */
+
+    // @written-audit-high arbitrary from address. 
+    // Alice approve the tokens to the bridge to send the l1 tokens and receive L2 tokens
+    // but before she do it, bob swops in and calls this function putting from: Alice l2Receipient: bob.
+    // So he would steal all the money from  Alice and receive the l2 tokens to him
+
+    // @written-audit-high we can mint infinite L2 tokens transfering the money from the vault to the vault itself
     function depositTokensToL2(address from, address l2Recipient, uint256 amount) external whenNotPaused {
         if (token.balanceOf(address(vault)) + amount > DEPOSIT_LIMIT) {
             revert L1BossBridge__DepositLimitReached();
@@ -88,6 +95,7 @@ contract L1BossBridge is Ownable, Pausable, ReentrancyGuard {
      * @param r The r value of the signature
      * @param s The s value of the signature
      */
+    // @written-audit-high signature replay attack
     function withdrawTokensToL1(address to, uint256 amount, uint8 v, bytes32 r, bytes32 s) external {
         sendToL1(
             v,
@@ -109,6 +117,9 @@ contract L1BossBridge is Ownable, Pausable, ReentrancyGuard {
      * @param s The s value of the signature
      * @param message The message/data to be sent to L1 (can be blank)
      */
+
+    // @written-audit-high can be sent arbitrary messages 
+    // @written-audit-high gas bomb --> same root cause as above
     function sendToL1(uint8 v, bytes32 r, bytes32 s, bytes memory message) public nonReentrant whenNotPaused {
         address signer = ECDSA.recover(MessageHashUtils.toEthSignedMessageHash(keccak256(message)), v, r, s);
 

